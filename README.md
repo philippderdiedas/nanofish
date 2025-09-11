@@ -25,6 +25,25 @@ Nanofish is designed for embedded systems with limited memory. It provides a sim
 - **Timeout & Retry Support** - Built-in handling for network issues
 - **DNS Resolution** - Automatic hostname resolution
 
+## Installation & Feature Flags
+
+### Basic HTTP Support (Default)
+```toml
+[dependencies]
+nanofish = "0.9.1"
+```
+
+### With TLS/HTTPS Support
+```toml
+[dependencies]
+nanofish = { version = "0.9.1", features = ["tls"] }
+```
+
+### Available Features
+- **`tls`** - Enables HTTPS/TLS support via `embedded-tls`
+  - When disabled (default): Only HTTP requests are supported
+  - When enabled: Full HTTPS support with TLS 1.2/1.3
+
 ## Zero-Copy Architecture
 
 Unlike traditional HTTP clients that copy response data multiple times, Nanofish uses a zero-copy approach:
@@ -45,24 +64,9 @@ Network → YOUR Buffer (direct) → Zero-Copy References → User Code (no copi
 - **Predictable** - No hidden allocations
 - **Embedded-Friendly** - Works well in resource-limited environments
 
-## Installation & Feature Flags
+---
 
-### Basic HTTP Support (Default)
-```toml
-[dependencies]
-nanofish = "0.9.0"
-```
-
-### With TLS/HTTPS Support
-```toml
-[dependencies]
-nanofish = { version = "0.9.0", features = ["tls"] }
-```
-
-### Available Features
-- **`tls`** - Enables HTTPS/TLS support via `embedded-tls`
-  - When disabled (default): Only HTTP requests are supported
-  - When enabled: Full HTTPS support with TLS 1.2/1.3
+# HTTP Client
 
 ## Quick Start
 
@@ -80,7 +84,7 @@ async fn example(stack: &Stack<'_>) -> Result<(), nanofish::Error> {
 let client = DefaultHttpClient::new(unsafe { core::ptr::NonNull::dangling().as_ref() });
 let mut response_buffer = [0u8; 8192];
 let headers = [
-    HttpHeader::user_agent("Nanofish/0.9.0"),
+    HttpHeader::user_agent("Nanofish/0.9.1"),
     HttpHeader::content_type(mime_types::JSON),
     HttpHeader::authorization("Bearer token123"),
 ];
@@ -252,7 +256,62 @@ All methods return a `Result<(HttpResponse, usize), Error>` where:
 - `HttpResponse` contains zero-copy references to data in your buffer
 - `usize` is the number of bytes read into your buffer
 
-## HTTP Server
+## Client Memory Configuration
+
+Just like the server, you can choose different client sizes:
+
+```rust,ignore
+use nanofish::{DefaultHttpClient, SmallHttpClient, HttpClient};
+
+// Default client (4KB buffers) - good for most use cases
+let client = DefaultHttpClient::new(stack);
+
+// Small client (1KB buffers) - for memory-constrained devices  
+let client = SmallHttpClient::new(stack);
+
+// Custom client with your own buffer sizes
+type CustomClient<'a> = HttpClient<'a, 2048, 2048, 8192, 8192, 2048>;
+//                              TCP_RX ↑    ↑ TCP_TX  ↑     ↑ TLS_WRITE ↑ REQUEST
+//                                           TLS_READ ↑
+let client = CustomClient::new(stack);
+```
+
+### Buffer Size Parameters
+- **`TCP_RX`**: TCP receive buffer size (default: 4096 bytes)
+- **`TCP_TX`**: TCP transmit buffer size (default: 4096 bytes)  
+- **`TLS_READ`**: TLS read record buffer size (default: 4096 bytes)
+- **`TLS_WRITE`**: TLS write record buffer size (default: 4096 bytes)
+- **`RQ`**: HTTP request buffer size for building requests (default: 1024 bytes)
+
+Choose buffer sizes based on your memory constraints and expected payload sizes. The request buffer size determines the maximum size of HTTP requests that can be built, including headers and request line.
+
+## Memory Efficiency Examples
+
+Choose your buffer size based on your needs:
+
+```rust,ignore
+// Scenario 1: Memory-constrained device (1KB buffer)
+let mut tiny_buffer = [0u8; 1024];
+let (response, _) = client.get(url, &headers, &mut tiny_buffer).await?;
+// Perfect for small API responses, status checks, etc.
+
+// Scenario 2: Streaming large data (32KB buffer)
+let mut large_buffer = [0u8; 32768];
+let (response, bytes_read) = client.get(large_url, &headers, &mut large_buffer).await?;
+// Handle larger responses, file downloads, etc.
+
+// Scenario 3: Reuse the same buffer for multiple requests
+let mut shared_buffer = [0u8; 8192];
+for url in urls {
+    let (response, _) = client.get(url, &headers, &mut shared_buffer).await?;
+    process_response(&response);
+    // Buffer is reused for each request - no allocations!
+}
+```
+
+---
+
+# HTTP Server
 
 Nanofish includes a built-in HTTP server perfect for embedded systems and `IoT` devices. The server is async, lightweight, and has customizable timeouts.
 
@@ -387,68 +446,6 @@ The `SimpleHandler` provides:
 - `GET /` → HTML welcome page
 - `GET /health` → JSON status response  
 - Everything else → 404 Not Found
-
-## Memory Efficiency Examples
-
-Choose your buffer size based on your needs:
-
-```rust,ignore
-// Scenario 1: Memory-constrained device (1KB buffer)
-let mut tiny_buffer = [0u8; 1024];
-let (response, _) = client.get(url, &headers, &mut tiny_buffer).await?;
-// Perfect for small API responses, status checks, etc.
-
-// Scenario 2: Streaming large data (32KB buffer)
-let mut large_buffer = [0u8; 32768];
-let (response, bytes_read) = client.get(large_url, &headers, &mut large_buffer).await?;
-// Handle larger responses, file downloads, etc.
-
-// Scenario 3: Reuse the same buffer for multiple requests
-let mut shared_buffer = [0u8; 8192];
-for url in urls {
-    let (response, _) = client.get(url, &headers, &mut shared_buffer).await?;
-    process_response(&response);
-    // Buffer is reused for each request - no allocations!
-}
-```
-
-## Buffer Size Configuration
-
-Nanofish uses const generics to allow compile-time configuration of internal buffer sizes for optimal memory usage in different environments:
-
-### Default Configuration
-```rust,ignore
-use nanofish::DefaultHttpClient;  // TCP: 4KB/4KB, TLS: 4KB/4KB, Request: 1KB
-
-let client = DefaultHttpClient::new(stack);
-```
-
-### Memory-Constrained Environments
-```rust,ignore
-use nanofish::SmallHttpClient;   // TCP: 1KB/1KB, TLS: 1KB/1KB, Request: 1KB
-
-let client = SmallHttpClient::new(stack);
-```
-
-### Custom Buffer Sizes
-```rust,ignore
-use nanofish::HttpClient;
-
-// Custom TCP, TLS and request buffer sizes
-type CustomClient<'a> = HttpClient<'a, 2048, 2048, 8192, 8192, 2048>;
-//                              TCP_RX ↑    ↑ TCP_TX  ↑     ↑ TLS_WRITE ↑ REQUEST
-//                                           TLS_READ ↑
-let client = CustomClient::new(stack);
-```
-
-### Buffer Size Parameters
-- **`TCP_RX`**: TCP receive buffer size (default: 4096 bytes)
-- **`TCP_TX`**: TCP transmit buffer size (default: 4096 bytes)  
-- **`TLS_READ`**: TLS read record buffer size (default: 4096 bytes)
-- **`TLS_WRITE`**: TLS write record buffer size (default: 4096 bytes)
-- **`RQ`**: HTTP request buffer size for building requests (default: 1024 bytes)
-
-Choose buffer sizes based on your memory constraints and expected payload sizes. The request buffer size determines the maximum size of HTTP requests that can be built, including headers and request line.
 
 ## License
 
